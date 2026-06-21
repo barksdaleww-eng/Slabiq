@@ -1,11 +1,23 @@
 import { useState } from "react";
 
+const HEAT = {
+  fire: { label: "🔥 Fire", desc: "Extremely high demand", bg: "bg-orange-600", text: "text-orange-400" },
+  hot:  { label: "🌶️ Hot",  desc: "Strong sales activity",  bg: "bg-red-600",    text: "text-red-400"    },
+  warm: { label: "☀️ Warm", desc: "Moderate interest",      bg: "bg-yellow-600", text: "text-yellow-400" },
+  cold: { label: "❄️ Cold", desc: "Low demand right now",   bg: "bg-blue-700",   text: "text-blue-400"   },
+};
+
 function App() {
   const [card, setCard] = useState({
     player: "", year: "", brand: "", parallel: "", grade: "", currentValue: ""
   });
   const [prediction, setPrediction] = useState(null);
   const [loading, setLoading] = useState(false);
+
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState(null);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState(null);
 
   const brands = ["Panini Prizm", "Bowman Chrome", "Topps Chrome", "Panini Optic", "Select", "National Treasures", "Fleer Ultra", "Upper Deck", "Other"];
   const grades = ["Raw (Ungraded)", "PSA 10", "PSA 9", "PSA 8", "BGS 10 Black", "BGS 9.5", "BGS 9", "SGC 10", "SGC 9.5"];
@@ -50,17 +62,31 @@ Respond ONLY with a JSON object, no other text:
         })
       });
       const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || JSON.stringify(data));
-      }
+      if (!res.ok) throw new Error(data.error || JSON.stringify(data));
       const text = data.content[0].text;
       const clean = text.replace(/```json|```/g, "").trim();
-      const result = JSON.parse(clean);
-      setPrediction(result);
+      setPrediction(JSON.parse(clean));
     } catch (err) {
       alert("Prediction failed: " + err.message);
     }
     setLoading(false);
+  };
+
+  const handleSearch = async (e) => {
+    e?.preventDefault();
+    if (!searchQuery.trim()) return;
+    setSearchLoading(true);
+    setSearchResults(null);
+    setSearchError(null);
+    try {
+      const res = await fetch(`/api/ebay?q=${encodeURIComponent(searchQuery.trim())}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Search failed");
+      setSearchResults(data);
+    } catch (err) {
+      setSearchError(err.message);
+    }
+    setSearchLoading(false);
   };
 
   return (
@@ -95,7 +121,7 @@ Respond ONLY with a JSON object, no other text:
       </section>
 
       {/* Prediction Tool */}
-      <section className="max-w-3xl mx-auto px-6 pb-24">
+      <section className="max-w-3xl mx-auto px-6 pb-10">
         <div className="bg-gray-900 rounded-2xl p-8 border border-gray-800">
           <h2 className="text-2xl font-bold mb-6">🔮 Predict Card Value</h2>
 
@@ -169,7 +195,7 @@ Respond ONLY with a JSON object, no other text:
           </button>
         </div>
 
-        {/* Results */}
+        {/* AI Results */}
         {prediction && (
           <div className="mt-6 bg-gray-900 rounded-2xl p-8 border border-gray-800">
             <h2 className="text-2xl font-bold mb-6">📈 Value Forecast</h2>
@@ -207,6 +233,98 @@ Respond ONLY with a JSON object, no other text:
             </div>
           </div>
         )}
+      </section>
+
+      {/* eBay Card Search */}
+      <section className="max-w-6xl mx-auto px-6 pb-24">
+        <div className="bg-gray-900 rounded-2xl p-8 border border-gray-800">
+          <h2 className="text-2xl font-bold mb-2">🔍 eBay Sold Listings</h2>
+          <p className="text-gray-400 text-sm mb-6">Search real sold prices to compare against the AI prediction.</p>
+
+          <form onSubmit={handleSearch} className="flex gap-3 mb-6">
+            <input
+              className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
+              placeholder="e.g. Patrick Mahomes Prizm rookie PSA 10"
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+            />
+            <button
+              type="submit"
+              disabled={searchLoading}
+              className="bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 px-6 py-3 rounded-lg font-semibold whitespace-nowrap"
+            >
+              {searchLoading ? "Searching..." : "Search eBay →"}
+            </button>
+          </form>
+
+          {searchError && (
+            <div className="bg-red-900/40 border border-red-700 rounded-xl p-4 text-red-300 mb-4">
+              {searchError}
+            </div>
+          )}
+
+          {searchResults && (
+            <>
+              {/* Stats bar */}
+              <div className="flex flex-wrap items-center gap-4 mb-6 p-4 bg-gray-800 rounded-xl">
+                <div>
+                  <span className="text-gray-400 text-sm">Avg Sold Price</span>
+                  <div className="text-2xl font-black text-green-400">${searchResults.avg}</div>
+                </div>
+                <div className="w-px h-10 bg-gray-700" />
+                <div>
+                  <span className="text-gray-400 text-sm">Recent Sales</span>
+                  <div className="text-2xl font-black text-white">{searchResults.count}</div>
+                </div>
+                <div className="w-px h-10 bg-gray-700" />
+                <div>
+                  <span className="text-gray-400 text-sm block mb-1">Market Heat</span>
+                  <span className={`px-3 py-1 rounded-full text-sm font-bold ${HEAT[searchResults.heat].bg}`}>
+                    {HEAT[searchResults.heat].label}
+                  </span>
+                </div>
+                <div className={`ml-auto text-sm ${HEAT[searchResults.heat].text}`}>
+                  {HEAT[searchResults.heat].desc}
+                </div>
+              </div>
+
+              {searchResults.items.length === 0 ? (
+                <p className="text-gray-400 text-center py-8">No sold listings found. Try a broader search.</p>
+              ) : (
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4 max-h-[680px] overflow-y-auto pr-1">
+                  {searchResults.items.map(item => (
+                    <a
+                      key={item.id}
+                      href={item.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="bg-gray-800 rounded-xl overflow-hidden border border-gray-700 hover:border-blue-500 transition-colors group flex flex-col"
+                    >
+                      <div className="aspect-[3/4] bg-gray-700 overflow-hidden">
+                        {item.image ? (
+                          <img
+                            src={item.image}
+                            alt={item.title}
+                            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
+                          />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center text-gray-500 text-3xl">🃏</div>
+                        )}
+                      </div>
+                      <div className="p-3 flex flex-col flex-1">
+                        <p className="text-xs text-gray-300 line-clamp-2 mb-2 flex-1">{item.title}</p>
+                        <div className="flex items-center justify-between mt-auto">
+                          <span className="text-green-400 font-black text-lg">${item.price.toFixed(2)}</span>
+                          <span className="text-xs text-blue-400 group-hover:underline">View →</span>
+                        </div>
+                      </div>
+                    </a>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </div>
       </section>
     </div>
   );
