@@ -50,12 +50,15 @@ Respond ONLY with a JSON object, no other text:
         })
       });
       const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || JSON.stringify(data));
+      }
       const text = data.content[0].text;
       const clean = text.replace(/```json|```/g, "").trim();
       const result = JSON.parse(clean);
       setPrediction(result);
     } catch (err) {
-      alert("Prediction failed — make sure your API route is set up");
+      alert("Prediction failed: " + err.message);
     }
     setLoading(false);
   };
