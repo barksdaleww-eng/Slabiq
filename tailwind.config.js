@@ -1,6 +1,15 @@
 /** @type {import('tailwindcss').Config} */
 export default {
   content: ["./index.html", "./src/**/*.{js,jsx}"],
-  theme: { extend: {} },
+  theme: {
+    extend: {
+      keyframes: {
+        ticker: { "0%": { transform: "translateX(0)" }, "100%": { transform: "translateX(-33.333%)" } },
+      },
+      animation: {
+        ticker: "ticker 30s linear infinite",
+      },
+    },
+  },
   plugins: [],
 }

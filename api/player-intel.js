@@ -20,7 +20,7 @@ Find:
 2. Current injury status or health reports
 3. Recent performance stats or highlights
 4. Any trade rumors, contract news, or off-field news
-5. Overall outlook — is this player trending UP (more valuable cards) or DOWN?
+5. Overall outlook — is this player trending UP or DOWN for card collectors?
 
 Respond ONLY with a JSON object, no other text:
 {
@@ -30,13 +30,15 @@ Respond ONLY with a JSON object, no other text:
   "heat": "fire | hot | warm | cold",
   "heatReason": "one sentence why",
   "injuryStatus": "Active | Questionable | Out | IR | Healthy",
-  "injuryDetail": "details or null",
+  "injuryDetail": "brief detail or null",
   "headlines": [
     { "title": "headline text", "source": "ESPN/etc", "summary": "1 sentence" }
   ],
   "recentStats": "2-3 sentence summary of recent performance",
   "cardOutlook": "BUY | HOLD | SELL",
-  "outlookReason": "1-2 sentences on what this news means for card values"
+  "outlookReason": "1-2 sentences on what this news means for card values",
+  "alertCard": "specific card to watch e.g. '2023 Prizm #251 Rookie' or null if nothing notable",
+  "alertStat": "stat or fact that makes this card notable e.g. 'up 40% this week' or null"
 }`;
 
   try {
@@ -60,7 +62,6 @@ Respond ONLY with a JSON object, no other text:
       return res.status(response.status).json({ error: data.error?.message || "Claude API error" });
     }
 
-    // Extract the final text block (Claude may emit tool_use blocks before the answer)
     const textBlock = data.content?.findLast?.(b => b.type === "text");
     if (!textBlock) {
       return res.status(500).json({ error: "No text response from Claude" });
