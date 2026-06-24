@@ -122,16 +122,24 @@ function EmptyState({ message }) {
 
 function SoldTab({ market, loading }) {
   if (loading) return <div>{[...Array(5)].map((_, i) => <ListingSkeleton key={i} />)}</div>;
-  if (market?.error && !market.sold.length) {
+
+  // Sold price history is temporarily unavailable (pending Marketplace Insights API access)
+  if (market?.soldUnavailable || !market?.sold.length) {
     return (
-      <div className="py-10 px-4 text-center">
-        <AlertTriangle className="w-8 h-8 text-amber-400 mx-auto mb-2" />
-        <p className="text-amber-400 font-semibold mb-1">eBay API Error</p>
-        <p className="text-sm text-slate-500">{market.error}</p>
+      <div className="py-14 px-6 text-center">
+        <div className="w-14 h-14 rounded-2xl bg-slate-800 border border-white/8 flex items-center justify-center mx-auto mb-4">
+          <TrendingUp className="w-7 h-7 text-slate-600" />
+        </div>
+        <p className="text-white font-bold mb-1">Sold Price History</p>
+        <p className="text-slate-400 text-sm mb-3">Temporarily unavailable — coming soon.</p>
+        <p className="text-slate-600 text-xs leading-relaxed max-w-xs mx-auto">
+          We're switching to eBay's new Marketplace Insights API for accurate sold comps.
+          Check the <span className="text-blue-400 font-semibold">For Sale</span> tab for current asking prices,
+          or use <span className="text-blue-400 font-semibold">AI Predict</span> for value estimates.
+        </p>
       </div>
     );
   }
-  if (!market?.sold.length) return <EmptyState message="Try a different player name or add details like 'Prizm PSA 10'" />;
 
   const { stats } = market;
   return (

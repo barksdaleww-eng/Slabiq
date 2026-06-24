@@ -1,158 +1,111 @@
-// Unified search: runs eBay (sold + active) and Claude player intel in parallel.
-// Returns { market: { sold, active, stats, keywords, error? }, intel: PlayerIntel }
+// Unified search: Browse API (active listings) + Claude player intel, run in parallel.
+// Sold price history uses a stub until eBay Marketplace Insights API access is approved.
+// Returns { market: { sold, soldUnavailable, active, stats, keywords }, intel: PlayerIntel }
 
 export const config = { maxDuration: 45 };
 
-const EBAY_ENDPOINT = "https://svcs.ebay.com/services/search/FindingService/v1";
-const CARD_CATEGORY = "212";
+// ─── OAuth2 token cache (module-level, survives warm container reuse) ──────────
 
-function safeFloat(v) {
-  const n = parseFloat(String(v ?? "0"));
-  return isNaN(n) ? 0 : n;
-}
+let _tokenCache = null; // { token: string, expiresAt: number }
 
-function parseItems(data, opKey) {
-  try {
-    const resp = data[opKey]?.[0];
-    if (!resp) return [];
-    const ack = resp.ack?.[0];
-    if (ack !== "Success" && ack !== "Warning") return [];
-    const items = resp.searchResult?.[0]?.item ?? [];
-    return items.map((it) => ({
-      itemId: it.itemId?.[0] ?? "",
-      title: it.title?.[0] ?? "",
-      price: safeFloat(
-        it.sellingStatus?.[0]?.convertedCurrentPrice?.[0]?.__value__ ??
-        it.sellingStatus?.[0]?.currentPrice?.[0]?.__value__
-      ),
-      imageUrl: (it.galleryURL?.[0] ?? "").replace("s-l140", "s-l400"),
-      url: it.viewItemURL?.[0] ?? "",
-      date: it.listingInfo?.[0]?.endTime?.[0] ?? it.listingInfo?.[0]?.startTime?.[0] ?? "",
-      condition: it.condition?.[0]?.conditionDisplayName?.[0] ?? "",
-      isAuction: it.listingInfo?.[0]?.listingType?.[0] === "Auction",
-    }));
-  } catch {
-    return [];
-  }
-}
-
-async function ebayGet(appId, operation, extra) {
-  const url = new URL(EBAY_ENDPOINT);
-  const base = {
-    "OPERATION-NAME": operation,
-    "SERVICE-VERSION": "1.13.0",
-    "SECURITY-APPNAME": appId,
-    "RESPONSE-DATA-FORMAT": "JSON",
-    "GLOBAL-ID": "EBAY-US",
-    "siteid": "0",
-  };
-  for (const [k, v] of Object.entries({ ...base, ...extra })) {
-    url.searchParams.set(k, v);
-  }
-
-  const headers = {
-    "X-EBAY-SOA-SECURITY-APPNAME": appId,
-    "X-EBAY-SOA-OPERATION-NAME": operation,
-    "X-EBAY-SOA-SERVICE-VERSION": "1.13.0",
-    "X-EBAY-SOA-GLOBAL-ID": "EBAY-US",
-    "X-EBAY-SOA-RESPONSE-DATA-FORMAT": "JSON",
-  };
-
-  // Retry up to 3 times with backoff — Finding API throws intermittent 503s
-  const delays = [0, 1000, 2500];
-  let lastErr;
-  for (const delay of delays) {
-    if (delay > 0) await new Promise((r) => setTimeout(r, delay));
-    let res;
-    try {
-      res = await fetch(url.toString(), {
-        headers,
-        signal: AbortSignal.timeout(14000),
-      });
-    } catch (e) {
-      lastErr = e;
-      continue;
-    }
-    if (res.ok) return res.json();
-    const rawBody = await res.text().catch(() => "(unreadable)");
-    console.error(`[eBay] ${operation} attempt ${delays.indexOf(delay) + 1} → ${res.status}`, {
-      appIdLen: appId.length,
-      appIdPrefix: appId.slice(0, 6),
-      url: url.toString().replace(appId, "***"),
-      body: rawBody.slice(0, 500),
-    });
-    lastErr = new Error(`eBay ${res.status}: ${rawBody.slice(0, 200)}`);
-    // Don't retry on auth errors
-    if (res.status === 401 || res.status === 403) break;
-  }
-  throw lastErr;
-}
-
-function calcStats(sold) {
-  const prices = sold.map((s) => s.price).filter((p) => p > 0);
-  if (!prices.length) {
-    return { avgSold30d: 0, avgSold90d: 0, highSold: 0, lowSold: 0, totalSold: 0, trend: "flat", trendPct: 0 };
-  }
+async function getBrowseToken(clientId, clientSecret) {
   const now = Date.now();
-  const ago30 = now - 30 * 86400_000;
-  const ago60 = now - 60 * 86400_000;
-  const avg = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
-  const p30 = sold.filter((s) => new Date(s.date).getTime() > ago30).map((s) => s.price).filter(Boolean);
-  const p60 = sold.filter((s) => { const t = new Date(s.date).getTime(); return t > ago60 && t <= ago30; }).map((s) => s.price).filter(Boolean);
-  const avg30 = avg(p30);
-  const avgPrev = avg(p60);
-  const trendPct = avgPrev > 0 && avg30 > 0 ? ((avg30 - avgPrev) / avgPrev) * 100 : 0;
+  if (_tokenCache && _tokenCache.expiresAt > now + 60_000) {
+    return _tokenCache.token; // reuse if more than 1 min of life remains
+  }
+
+  const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
+  const res = await fetch("https://api.ebay.com/identity/v1/oauth2/token", {
+    method: "POST",
+    headers: {
+      "Authorization": `Basic ${credentials}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: "grant_type=client_credentials&scope=https%3A%2F%2Fapi.ebay.com%2Foauth%2Fapi_scope",
+    signal: AbortSignal.timeout(10000),
+  });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`eBay OAuth ${res.status}: ${body.slice(0, 200)}`);
+  }
+
+  const data = await res.json();
+  // Cache for expires_in minus a 5-minute safety buffer
+  _tokenCache = {
+    token: data.access_token,
+    expiresAt: now + (data.expires_in - 300) * 1000,
+  };
+  return _tokenCache.token;
+}
+
+// ─── Browse API — active listings ─────────────────────────────────────────────
+
+async function getActiveListings(token, keywords, limit = 20) {
+  const url = new URL("https://api.ebay.com/buy/browse/v1/item_summary/search");
+  url.searchParams.set("q", keywords);
+  url.searchParams.set("category_ids", "212"); // Sports Trading Cards
+  url.searchParams.set("limit", String(limit));
+  url.searchParams.set("sort", "price");
+  // FIXED_PRICE and auction-with-BIN only (no pure auctions)
+  url.searchParams.set("filter", "buyingOptions:{FIXED_PRICE|AUCTION_WITH_BUY_IT_NOW}");
+
+  const res = await fetch(url.toString(), {
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
+      "Content-Type": "application/json",
+    },
+    signal: AbortSignal.timeout(12000),
+  });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    console.error(`[eBay Browse] ${res.status}`, body.slice(0, 300));
+    throw new Error(`eBay Browse ${res.status}`);
+  }
+
+  const data = await res.json();
+  return (data.itemSummaries ?? []).map((it) => ({
+    itemId: it.itemId ?? "",
+    title: it.title ?? "",
+    price: parseFloat(it.price?.value ?? "0") || 0,
+    imageUrl: it.image?.imageUrl ?? "",
+    url: it.itemWebUrl ?? "",
+    date: "",      // Browse API doesn't return listing start time in summary
+    condition: it.condition ?? "",
+    isAuction: it.buyingOptions?.includes("AUCTION_WITH_BUY_IT_NOW") ?? false,
+  }));
+}
+
+// ─── Sold price history stub ───────────────────────────────────────────────────
+// TODO: replace with eBay Marketplace Insights API once access is approved.
+// Endpoint: GET https://api.ebay.com/buy/marketplace_insights/v1_beta/item_sales/search
+// Auth: same OAuth2 client-credentials token as Browse API.
+// Params: q, category_ids=212, sort=lastSoldDate, limit=25
+
+function getSoldStub() {
   return {
-    avgSold30d: avg30,
-    avgSold90d: avg(prices),
-    highSold: Math.max(...prices),
-    lowSold: Math.min(...prices),
-    totalSold: sold.length,
-    trend: trendPct > 2 ? "up" : trendPct < -2 ? "down" : "flat",
-    trendPct,
+    sold: [],
+    soldUnavailable: true, // signals the UI to show "coming soon" instead of "no results"
+    stats: { avgSold30d: 0, avgSold90d: 0, highSold: 0, lowSold: 0, totalSold: 0, trend: "flat", trendPct: 0 },
   };
 }
 
-async function fetchMarketData(appId, player) {
+// ─── Market data (Browse active + sold stub) ───────────────────────────────────
+
+async function fetchMarketData(clientId, clientSecret, player) {
   const kw = `${player} card`;
-  const [soldResult, activeResult] = await Promise.allSettled([
-    ebayGet(appId, "findCompletedItems", {
-      keywords: kw,
-      categoryId: CARD_CATEGORY,
-      "itemFilter(0).name": "SoldItemsOnly",
-      "itemFilter(0).value": "true",
-      "itemFilter(1).name": "ListingType",
-      "itemFilter(1).value(0)": "Auction",
-      "itemFilter(1).value(1)": "AuctionWithBIN",
-      "itemFilter(1).value(2)": "FixedPrice",
-      "sortOrder": "EndTimeSoonest",
-      "paginationInput.entriesPerPage": "50",
-      "outputSelector(0)": "SellerInfo",
-      "outputSelector(1)": "GalleryInfo",
-    }).then((d) => parseItems(d, "findCompletedItemsResponse")),
-    // TODO: migrate active listings to Browse API
-    ebayGet(appId, "findItemsAdvanced", {
-      keywords: kw,
-      categoryId: CARD_CATEGORY,
-      "itemFilter(0).name": "ListingType",
-      "itemFilter(0).value(0)": "FixedPrice",
-      "itemFilter(0).value(1)": "AuctionWithBIN",
-      "sortOrder": "PricePlusShippingLowest",
-      "paginationInput.entriesPerPage": "20",
-      "outputSelector(0)": "SellerInfo",
-      "outputSelector(1)": "GalleryInfo",
-    }).then((d) => parseItems(d, "findItemsAdvancedResponse")),
-  ]);
-  const sold = soldResult.status === "fulfilled" ? soldResult.value : [];
-  const active = activeResult.status === "fulfilled" ? activeResult.value : [];
+  const token = await getBrowseToken(clientId, clientSecret);
+  const active = await getActiveListings(token, kw, 20);
   return {
-    sold: sold.slice(0, 25),
+    ...getSoldStub(),
     active,
-    stats: calcStats(sold),
     keywords: kw,
-    error: soldResult.status === "rejected" ? String(soldResult.reason) : undefined,
   };
 }
+
+// ─── Claude player intel ───────────────────────────────────────────────────────
 
 async function getPlayerIntel(apiKey, player) {
   const prompt = `Search the web for the most recent news about ${player} as a professional sports player. Find their sport, team, injury status, recent performance, and overall card collector outlook.
@@ -212,33 +165,39 @@ function intelFallback(player) {
   };
 }
 
+// ─── Handler ───────────────────────────────────────────────────────────────────
+
 export default async function handler(req, res) {
   if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
 
   const { q } = req.query;
   if (!q?.trim()) return res.status(400).json({ error: "Missing query parameter: q" });
 
-  const appId = process.env.EBAY_APP_ID;
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const clientId     = process.env.EBAY_CLIENT_ID;
+  const clientSecret = process.env.EBAY_CLIENT_SECRET;
+  const apiKey       = process.env.ANTHROPIC_API_KEY;
 
-  // Diagnostic: confirm env vars are present at runtime (visible in Vercel function logs)
   console.log("[search] env check →", {
-    EBAY_APP_ID: appId ? `set (len=${appId.length}, prefix=${appId.slice(0, 6)})` : "MISSING",
-    ANTHROPIC_API_KEY: apiKey ? `set (len=${apiKey.length})` : "MISSING",
-    endpoint: EBAY_ENDPOINT,
+    EBAY_CLIENT_ID:     clientId     ? `set (len=${clientId.length})`     : "MISSING",
+    EBAY_CLIENT_SECRET: clientSecret ? `set (len=${clientSecret.length})` : "MISSING",
+    ANTHROPIC_API_KEY:  apiKey       ? `set (len=${apiKey.length})`       : "MISSING",
   });
 
-  if (!appId) return res.status(500).json({ error: "EBAY_APP_ID not configured" });
-  if (!apiKey) return res.status(500).json({ error: "ANTHROPIC_API_KEY not configured" });
+  if (!clientId || !clientSecret) {
+    return res.status(500).json({ error: "EBAY_CLIENT_ID or EBAY_CLIENT_SECRET not configured" });
+  }
+  if (!apiKey) {
+    return res.status(500).json({ error: "ANTHROPIC_API_KEY not configured" });
+  }
 
   const [marketResult, intelResult] = await Promise.allSettled([
-    fetchMarketData(appId, q.trim()),
+    fetchMarketData(clientId, clientSecret, q.trim()),
     getPlayerIntel(apiKey, q.trim()),
   ]);
 
   const market = marketResult.status === "fulfilled"
     ? marketResult.value
-    : { sold: [], active: [], stats: { avgSold30d: 0, avgSold90d: 0, highSold: 0, lowSold: 0, totalSold: 0, trend: "flat", trendPct: 0 }, keywords: q, error: String(marketResult.reason) };
+    : { ...getSoldStub(), active: [], keywords: q, error: String(marketResult.reason) };
 
   const intel = intelResult.status === "fulfilled"
     ? intelResult.value
