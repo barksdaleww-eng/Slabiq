@@ -43,14 +43,49 @@ async function ebayGet(appId, operation, extra) {
     "SERVICE-VERSION": "1.13.0",
     "SECURITY-APPNAME": appId,
     "RESPONSE-DATA-FORMAT": "JSON",
-    "REST-PAYLOAD": "",
+    "GLOBAL-ID": "EBAY-US",
+    "siteid": "0",
   };
   for (const [k, v] of Object.entries({ ...base, ...extra })) {
     url.searchParams.set(k, v);
   }
-  const res = await fetch(url.toString(), { signal: AbortSignal.timeout(12000) });
-  if (!res.ok) throw new Error(`eBay ${res.status}`);
-  return res.json();
+
+  const headers = {
+    "X-EBAY-SOA-SECURITY-APPNAME": appId,
+    "X-EBAY-SOA-OPERATION-NAME": operation,
+    "X-EBAY-SOA-SERVICE-VERSION": "1.13.0",
+    "X-EBAY-SOA-GLOBAL-ID": "EBAY-US",
+    "X-EBAY-SOA-RESPONSE-DATA-FORMAT": "JSON",
+  };
+
+  // Retry up to 3 times with backoff — Finding API throws intermittent 503s
+  const delays = [0, 1000, 2500];
+  let lastErr;
+  for (const delay of delays) {
+    if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+    let res;
+    try {
+      res = await fetch(url.toString(), {
+        headers,
+        signal: AbortSignal.timeout(14000),
+      });
+    } catch (e) {
+      lastErr = e;
+      continue;
+    }
+    if (res.ok) return res.json();
+    const rawBody = await res.text().catch(() => "(unreadable)");
+    console.error(`[eBay] ${operation} attempt ${delays.indexOf(delay) + 1} → ${res.status}`, {
+      appIdLen: appId.length,
+      appIdPrefix: appId.slice(0, 6),
+      url: url.toString().replace(appId, "***"),
+      body: rawBody.slice(0, 500),
+    });
+    lastErr = new Error(`eBay ${res.status}: ${rawBody.slice(0, 200)}`);
+    // Don't retry on auth errors
+    if (res.status === 401 || res.status === 403) break;
+  }
+  throw lastErr;
 }
 
 function calcStats(sold) {
@@ -185,6 +220,14 @@ export default async function handler(req, res) {
 
   const appId = process.env.EBAY_APP_ID;
   const apiKey = process.env.ANTHROPIC_API_KEY;
+
+  // Diagnostic: confirm env vars are present at runtime (visible in Vercel function logs)
+  console.log("[search] env check →", {
+    EBAY_APP_ID: appId ? `set (len=${appId.length}, prefix=${appId.slice(0, 6)})` : "MISSING",
+    ANTHROPIC_API_KEY: apiKey ? `set (len=${apiKey.length})` : "MISSING",
+    endpoint: EBAY_ENDPOINT,
+  });
+
   if (!appId) return res.status(500).json({ error: "EBAY_APP_ID not configured" });
   if (!apiKey) return res.status(500).json({ error: "ANTHROPIC_API_KEY not configured" });
 
